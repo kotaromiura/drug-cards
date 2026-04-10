@@ -1,9 +1,14 @@
 import streamlit as st
 import json
-import os
+import re
 import time
+import base64
+import requests
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), 'drugs.json')
+GITHUB_REPO  = 'kotaromiura/drug-cards'
+DRUGS_FILE   = 'drugs.json'
+HTML_FILE    = 'casa_druginfo.html'
+
 CATEGORIES = ['循環器', '糖尿病', 'アレルギー', '小児', '風邪', '消化器', 'その他',
               '感染症', '呼吸器', '解熱鎮痛', '皮膚科', '漢方', '睡眠', '外用薬']
 
@@ -11,39 +16,106 @@ CAT_STYLES = {
     '循環器':    {'bg': 'rgba(0,113,227,0.1)',   'color': '#0055b3', 'dot': '#0055b3'},
     '糖尿病':    {'bg': 'rgba(52,199,89,0.1)',   'color': '#1a7f37', 'dot': '#1a7f37'},
     'アレルギー':{'bg': 'rgba(255,149,0,0.1)',   'color': '#b85c00', 'dot': '#b85c00'},
-    '小児':    {'bg': 'rgba(175,82,222,0.1)',  'color': '#7b2fbe', 'dot': '#7b2fbe'},
+    '小児':      {'bg': 'rgba(175,82,222,0.1)',  'color': '#7b2fbe', 'dot': '#7b2fbe'},
     '風邪':      {'bg': 'rgba(90,200,250,0.15)', 'color': '#0077a8', 'dot': '#0077a8'},
-    '消化器':  {'bg': 'rgba(100,200,100,0.15)','color': '#2d7a2d', 'dot': '#2d7a2d'},
+    '消化器':    {'bg': 'rgba(100,200,100,0.1)', 'color': '#1a6b1a', 'dot': '#1a6b1a'},
     '感染症':    {'bg': 'rgba(255,59,48,0.1)',   'color': '#c0392b', 'dot': '#c0392b'},
     '呼吸器':    {'bg': 'rgba(100,180,255,0.15)','color': '#0055b3', 'dot': '#005ab5'},
     '解熱鎮痛':  {'bg': 'rgba(255,200,0,0.15)',  'color': '#8a6000', 'dot': '#8a6000'},
-    '消化器':    {'bg': 'rgba(100,200,100,0.1)', 'color': '#1a6b1a', 'dot': '#1a6b1a'},
     '皮膚科':    {'bg': 'rgba(255,150,150,0.15)','color': '#a03030', 'dot': '#a03030'},
     '漢方':      {'bg': 'rgba(180,140,80,0.15)', 'color': '#6b4e00', 'dot': '#6b4e00'},
     '睡眠':      {'bg': 'rgba(130,100,220,0.15)','color': '#4a2fa0', 'dot': '#4a2fa0'},
-    '外用薬':  {'bg': 'rgba(200,200,200,0.2)', 'color': '#444',    'dot': '#888'},
+    '外用薬':    {'bg': 'rgba(200,200,200,0.2)', 'color': '#444',    'dot': '#888'},
     'その他':    {'bg': 'rgba(0,0,0,0.06)',      'color': '#555',    'dot': '#aaa'},
 }
 
 st.set_page_config(page_title='お薬管理 — カーサファミリークリニック', layout='wide')
 
-# ===== データ読み書き =====
+# ===== パスワード認証 =====
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title('🔐 カーサファミリークリニック')
+    st.subheader('お薬管理システム')
+    st.write('')
+    pw = st.text_input('パスワード', type='password', placeholder='パスワードを入力')
+    if st.button('ログイン', type='primary'):
+        correct = st.secrets.get('PASSWORD', 'casaFC2024')
+        if pw == correct:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error('パスワードが違います')
+    st.stop()
+
+# ===== GitHub API =====
+def gh_token():
+    return st.secrets.get('GITHUB_TOKEN', '')
+
+def gh_headers():
+    return {'Authorization': f'token {gh_token()}', 'Content-Type': 'application/json'}
+
+def gh_get_file(path):
+    url = f'https://api.github.com/repos/{GITHUB_REPO}/contents/{path}'
+    r = requests.get(url, headers=gh_headers())
+    r.raise_for_status()
+    data = r.json()
+    content = base64.b64decode(data['content']).decode('utf-8')
+    return content, data['sha']
+
+def gh_put_file(path, content_str, sha, message):
+    url = f'https://api.github.com/repos/{GITHUB_REPO}/contents/{path}'
+    data = {
+        'message': message,
+        'content': base64.b64encode(content_str.encode('utf-8')).decode('utf-8'),
+        'sha': sha
+    }
+    r = requests.put(url, headers=gh_headers(), json=data)
+    r.raise_for_status()
+
 def load_drugs():
     try:
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
+        content, sha = gh_get_file(DRUGS_FILE)
+        st.session_state['drugs_sha'] = sha
+        return json.loads(content)
+    except Exception as e:
+        st.error(f'データの読み込みに失敗しました: {e}')
         return []
 
 def save_drugs(drugs):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(drugs, f, ensure_ascii=False, indent=2)
+    drugs_str = json.dumps(drugs, ensure_ascii=False, indent=2)
+    sha = st.session_state.get('drugs_sha', '')
 
-def make_id(brand):
+    # drugs.json を更新
+    gh_put_file(DRUGS_FILE, drugs_str, sha, 'Update drugs.json via admin')
+
+    # HTML に埋め込みデータを更新
+    try:
+        html_content, html_sha = gh_get_file(HTML_FILE)
+        drugs_json = json.dumps(drugs, ensure_ascii=False)
+        inline = f'  // ===== データ直接埋め込み =====\n  DRUGS = {drugs_json};\n  renderList();'
+        html_new = re.sub(
+            r'  // ===== データ直接埋め込み =====\n  DRUGS = .*?;\n  renderList\(\);',
+            inline,
+            html_content,
+            flags=re.DOTALL
+        )
+        gh_put_file(HTML_FILE, html_new, html_sha, 'Update HTML drug data via admin')
+    except Exception as e:
+        st.warning(f'HTMLの自動更新に失敗しました（drugs.jsonは保存済み）: {e}')
+
+    # SHA を更新
+    try:
+        _, new_sha = gh_get_file(DRUGS_FILE)
+        st.session_state['drugs_sha'] = new_sha
+    except:
+        pass
+
+def make_id():
     return 'drug_' + str(int(time.time() * 1000))
 
 def get_categories(d):
-    """categories(配列) または category(文字列) を統一して配列で返す"""
     cats = d.get('categories', d.get('category', ''))
     if isinstance(cats, list):
         return cats
@@ -63,9 +135,15 @@ def reload():
 # ===== ヘッダー =====
 st.title('💊 お薬管理')
 st.caption('カーサファミリークリニック — 院内処方お薬ガイド管理画面')
+
+col_logout, _ = st.columns([1, 9])
+with col_logout:
+    if st.button('ログアウト'):
+        st.session_state.authenticated = False
+        st.rerun()
+
 st.divider()
 
-# ===== モード切替ボタン =====
 col_add, col_reload, _ = st.columns([1, 1, 6])
 with col_add:
     if st.button('＋ 新規追加', type='primary'):
@@ -90,18 +168,17 @@ if st.session_state.mode in ('add', 'edit'):
     st.subheader('✏️ 薬の編集' if is_edit else '＋ 新規薬の追加')
 
     current_cats = get_categories(target) if target else []
-    # multiselectのdefaultはCATEGORIESに含まれるものだけ
     default_cats = [c for c in current_cats if c in CATEGORIES]
 
     with st.form('drug_form'):
-        brand        = st.text_input('商品名（必須）', value=target.get('brand', ''))
-        generic      = st.text_input('一般名（成分名）', value=target.get('generic', ''))
-        originator   = st.text_input('先発品名（ジェネリックの場合）', value=target.get('originator', ''))
-        categories   = st.multiselect('タグ（複数選択可）', CATEGORIES, default=default_cats)
-        purpose      = st.text_area('何のための薬ですか？', value=target.get('purpose', ''), height=80)
-        usage        = st.text_area('飲み方・タイミング', value=target.get('usage', ''), height=80)
-        side_effects = st.text_area('副作用', value=target.get('sideEffects', ''), height=80)
-        caution      = st.text_area('注意事項', value=target.get('caution', ''), height=80)
+        brand          = st.text_input('商品名（必須）', value=target.get('brand', ''))
+        generic        = st.text_input('一般名（成分名）', value=target.get('generic', ''))
+        originator     = st.text_input('先発品名（ジェネリックの場合）', value=target.get('originator', ''))
+        categories     = st.multiselect('タグ（複数選択可）', CATEGORIES, default=default_cats)
+        purpose        = st.text_area('何のための薬ですか？', value=target.get('purpose', ''), height=80)
+        usage          = st.text_area('飲み方・タイミング', value=target.get('usage', ''), height=80)
+        side_effects   = st.text_area('副作用', value=target.get('sideEffects', ''), height=80)
+        caution        = st.text_area('注意事項', value=target.get('caution', ''), height=80)
         doctor_comment = st.text_area('👨‍⚕️ ドクターコメント（任意）', value=target.get('doctorComment', ''), height=80)
 
         col_save, col_cancel = st.columns([1, 1])
@@ -114,24 +191,24 @@ if st.session_state.mode in ('add', 'edit'):
         if not brand.strip():
             st.error('商品名は必須です')
         else:
-            entry = {
-                'brand': brand, 'generic': generic, 'originator': originator,
-                'categories': categories,
-                'purpose': purpose, 'usage': usage,
-                'sideEffects': side_effects, 'caution': caution,
-                'doctorComment': doctor_comment
-            }
-            if is_edit and target:
-                target.update(entry)
-                # 古いcategoryキーを削除
-                target.pop('category', None)
-            else:
-                entry['id'] = make_id(brand)
-                drugs.append(entry)
-            save_drugs(drugs)
-            st.session_state.drugs = drugs
-            st.session_state.mode = 'list'
-            st.success('保存しました')
+            with st.spinner('GitHubに保存中...'):
+                entry = {
+                    'brand': brand, 'generic': generic, 'originator': originator,
+                    'categories': categories,
+                    'purpose': purpose, 'usage': usage,
+                    'sideEffects': side_effects, 'caution': caution,
+                    'doctorComment': doctor_comment
+                }
+                if is_edit and target:
+                    target.update(entry)
+                    target.pop('category', None)
+                else:
+                    entry['id'] = make_id()
+                    drugs.append(entry)
+                save_drugs(drugs)
+                st.session_state.drugs = drugs
+                st.session_state.mode = 'list'
+            st.success('保存しました（GitHub・HTMLも自動更新済み）')
             st.rerun()
 
     if cancelled:
@@ -164,7 +241,6 @@ else:
             primary = cats[0] if cats else ''
             cs = CAT_STYLES.get(primary, {'bg': 'rgba(0,0,0,0.06)', 'color': '#555', 'dot': '#aaa'})
 
-            # タグバッジHTML生成
             badges_html = ''.join([
                 f'<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;'
                 f'background:{CAT_STYLES.get(c, {}).get("bg","rgba(0,0,0,0.06)")};'
@@ -200,6 +276,7 @@ else:
             with col_del:
                 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
                 if st.button('削除', key=f"del_{d['id']}", use_container_width=True):
-                    st.session_state.drugs = [x for x in drugs if x['id'] != d['id']]
-                    save_drugs(st.session_state.drugs)
+                    with st.spinner('削除中...'):
+                        st.session_state.drugs = [x for x in drugs if x['id'] != d['id']]
+                        save_drugs(st.session_state.drugs)
                     st.rerun()
